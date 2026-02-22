@@ -72,7 +72,7 @@ Fetch all your Kindle highlights directly from Amazon with a single command — 
 ### First-Time Setup
 
 ```bash
-pip install -r ~/.openclaw/workspace/skills/hi-lite/tools/requirements.txt
+pip install "playwright>=1.40.0"
 playwright install chromium
 ```
 
@@ -92,11 +92,7 @@ After fetching, Hi-Lite automatically imports the highlights into your library.
 
 ### Non-US Amazon Domains
 
-If your Amazon account is on a non-US store (e.g., amazon.co.uk, amazon.de), mention it to your assistant or use the flag directly:
-
-```bash
-python tools/fetch_highlights.py --amazon-domain amazon.co.uk
-```
+If your Amazon account is on a non-US store (e.g., amazon.co.uk, amazon.de), just mention it to your assistant.
 
 ---
 

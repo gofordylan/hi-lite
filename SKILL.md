@@ -88,7 +88,7 @@ Each clipping is separated by `==========`. Parse the title/author from the firs
 
 **Bookcision text export** — Similar to My Clippings but may have different formatting. Adapt parsing accordingly.
 
-**Hi-Lite fetch JSON** — JSON output from `tools/fetch_highlights.py` (identifiable by `"source": "amazon-kindle-notebook"`). Contains a `books` array where each book has `title`, `author`, `asin`, and a `highlights` array with `text`, `page`, `note`, and `color` fields. Parse directly using the structured data. Map `page` to the location metadata line.
+**Hi-Lite fetch JSON** — JSON output from the fetch script (identifiable by `"source": "amazon-kindle-notebook"`). Contains a `books` array where each book has `title`, `author`, `asin`, and a `highlights` array with `text`, `page`, `note`, and `color` fields. Parse directly using the structured data. Map `page` to the location metadata line.
 
 **Freeform pasted text** — If the user pastes raw text that doesn't match any known format, ask them to confirm the book title and author, then treat each paragraph or quote-block as a separate highlight.
 
@@ -262,27 +262,292 @@ Each quote includes full attribution (author and book title) since collections p
 
 ### First-Time Setup
 
-Check if Playwright is installed by attempting to import it. If not available, guide the user through setup:
+Check if Playwright is available by running `python3 -c "from playwright.sync_api import sync_playwright"`. If it fails, guide the user:
 
 ```bash
-pip install -r ~/.openclaw/workspace/skills/hi-lite/tools/requirements.txt
+pip install "playwright>=1.40.0"
 playwright install chromium
 ```
 
 ### Execution
 
-1. Run the fetch script via bash:
-   ```bash
-   python ~/.openclaw/workspace/skills/hi-lite/tools/fetch_highlights.py
-   ```
-2. A Chromium browser window will open and navigate to Amazon's notebook page.
-3. If the user isn't logged in, the script will pause and prompt them to sign in manually in the browser (this handles 2FA, CAPTCHA, etc.). The session is saved so future fetches won't require login.
-4. The script iterates through all annotated books, extracts highlights, and saves a JSON file to `~/.openclaw/workspace/hi-lite/raw/`.
-5. The script prints progress and a summary when done.
+When the user triggers a fetch:
 
-### Post-Fetch
+1. Write the following Python script to `~/.openclaw/workspace/hi-lite/raw/fetch_highlights.py`.
+2. Run it via bash: `python3 ~/.openclaw/workspace/hi-lite/raw/fetch_highlights.py` (append `--amazon-domain amazon.co.uk` etc. if the user specifies a non-US domain).
+3. The script opens a visible Chromium window. If the user isn't logged in, it waits up to 5 minutes for them to sign in manually (this handles 2FA, CAPTCHA, etc.). Session cookies are saved at `~/.openclaw/workspace/hi-lite/.browser-data/` so future fetches skip login.
+4. The script iterates through all annotated books in the sidebar, extracts highlights, and saves a JSON file to `~/.openclaw/workspace/hi-lite/raw/kindle-fetch-{timestamp}.json`.
+5. After the script finishes, delete the script file (`fetch_highlights.py`) from `raw/` so it doesn't get parsed as an import.
+6. Then automatically run the standard import flow (Section 2) on the fetched JSON file.
 
-After the fetch completes, automatically run the standard import flow (Section 2) on the fetched JSON file. The Hi-Lite fetch JSON format is a supported import format — see the Import & Parse section.
+**The script to write:**
+
+```python
+#!/usr/bin/env python3
+"""Fetch Kindle highlights from Amazon's read.amazon.com/notebook page."""
+
+import argparse
+import json
+import os
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+try:
+    from playwright.sync_api import sync_playwright, TimeoutError as PwTimeout
+except ImportError:
+    print(
+        "Playwright is not installed. Run:\n"
+        "  pip install 'playwright>=1.40.0'\n"
+        "  playwright install chromium"
+    )
+    sys.exit(1)
+
+DEFAULT_BROWSER_DATA = os.path.expanduser(
+    "~/.openclaw/workspace/hi-lite/.browser-data"
+)
+DEFAULT_OUTPUT_DIR = os.path.expanduser("~/.openclaw/workspace/hi-lite/raw")
+DEFAULT_DOMAIN = "amazon.com"
+LOGIN_TIMEOUT_SEC = 300
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Fetch Kindle highlights from Amazon"
+    )
+    parser.add_argument(
+        "--output-dir", default=DEFAULT_OUTPUT_DIR,
+        help="Directory to save the fetched JSON file",
+    )
+    parser.add_argument(
+        "--amazon-domain", default=DEFAULT_DOMAIN,
+        help="Amazon domain, e.g. amazon.co.uk",
+    )
+    parser.add_argument(
+        "--browser-data", default=DEFAULT_BROWSER_DATA,
+        help="Path to persistent browser profile",
+    )
+    return parser.parse_args()
+
+
+def wait_for_login(page, timeout_sec=LOGIN_TIMEOUT_SEC):
+    print("Login required — please sign in to Amazon in the browser window.")
+    print(f"Waiting up to {timeout_sec // 60} minutes for login...")
+    deadline = time.time() + timeout_sec
+    while time.time() < deadline:
+        url = page.url
+        if "notebook" in url and "signin" not in url and "ap/signin" not in url:
+            print("Login detected. Continuing...")
+            return True
+        time.sleep(2)
+    print("Login timed out.")
+    return False
+
+
+def scroll_to_load_all(page, container_selector, item_selector):
+    previous_count = 0
+    stale_rounds = 0
+    while stale_rounds < 3:
+        items = page.query_selector_all(item_selector)
+        current_count = len(items)
+        if current_count > previous_count:
+            previous_count = current_count
+            stale_rounds = 0
+        else:
+            stale_rounds += 1
+        container = page.query_selector(container_selector)
+        if container:
+            container.evaluate("el => el.scrollTop = el.scrollHeight")
+        else:
+            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        time.sleep(1)
+    return previous_count
+
+
+def extract_highlights_from_pane(page):
+    highlights = []
+    annotations = page.query_selector_all(".a-row.a-spacing-base")
+    for annotation in annotations:
+        header = annotation.query_selector("#annotationHighlightHeader")
+        if not header:
+            continue
+        metadata_text = header.inner_text().strip()
+        color = ""
+        page_num = ""
+        if "|" in metadata_text:
+            parts = [p.strip() for p in metadata_text.split("|")]
+            if parts:
+                color = parts[0].replace("highlight", "").strip()
+            if len(parts) > 1 and ":" in parts[1]:
+                page_num = parts[1].split(":", 1)[1].strip()
+        text_el = annotation.query_selector("#highlight")
+        text = text_el.inner_text().strip() if text_el else ""
+        note_el = annotation.query_selector("#note")
+        note = note_el.inner_text().strip() if note_el else ""
+        if text:
+            highlights.append({
+                "text": text, "page": page_num,
+                "note": note, "color": color,
+            })
+    return highlights
+
+
+def fetch_highlights(args):
+    domain = args.amazon_domain
+    notebook_url = f"https://read.{domain}/notebook"
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    browser_data = Path(args.browser_data)
+    browser_data.mkdir(parents=True, exist_ok=True)
+
+    with sync_playwright() as pw:
+        context = pw.chromium.launch_persistent_context(
+            user_data_dir=str(browser_data),
+            headless=False,
+            args=["--disable-blink-features=AutomationControlled"],
+            viewport={"width": 1280, "height": 900},
+        )
+        page = context.pages[0] if context.pages else context.new_page()
+
+        print(f"Navigating to {notebook_url} ...")
+        page.goto(notebook_url, wait_until="domcontentloaded", timeout=60000)
+        time.sleep(3)
+
+        if "signin" in page.url or "ap/signin" in page.url:
+            if not wait_for_login(page):
+                context.close()
+                sys.exit(1)
+            page.goto(notebook_url, wait_until="domcontentloaded", timeout=60000)
+            time.sleep(3)
+
+        print("Waiting for notebook to load...")
+        try:
+            page.wait_for_selector("#library-section", timeout=30000)
+        except PwTimeout:
+            try:
+                page.wait_for_selector(
+                    ".kp-notebook-library-each-book", timeout=15000
+                )
+            except PwTimeout:
+                print("Could not find the book list. The page may have changed.")
+                context.close()
+                sys.exit(1)
+
+        time.sleep(2)
+
+        print("Discovering books in your library...")
+        scroll_to_load_all(
+            page, "#library-section", ".kp-notebook-library-each-book"
+        )
+
+        book_elements = page.query_selector_all(
+            ".kp-notebook-library-each-book"
+        )
+        total_books = len(book_elements)
+        print(f"Found {total_books} annotated books.")
+
+        if total_books == 0:
+            print("No annotated books found.")
+            context.close()
+            return
+
+        books_data = []
+        for i in range(total_books):
+            book_elements = page.query_selector_all(
+                ".kp-notebook-library-each-book"
+            )
+            if i >= len(book_elements):
+                break
+            book_el = book_elements[i]
+
+            title_el = book_el.query_selector("h2, .kp-notebook-searchable")
+            sidebar_title = (
+                title_el.inner_text().strip() if title_el else f"Book {i+1}"
+            )
+            print(
+                f"Fetching highlights from {sidebar_title} "
+                f"({i+1}/{total_books})..."
+            )
+
+            book_el.click()
+            time.sleep(2)
+
+            try:
+                page.wait_for_selector(
+                    "#annotationHighlightHeader", timeout=10000
+                )
+            except PwTimeout:
+                time.sleep(2)
+
+            title = ""
+            author = ""
+            asin = ""
+
+            title_header = page.query_selector(
+                ".kp-notebook-metadata h3, "
+                ".kp-notebook-metadata .a-size-base-plus"
+            )
+            if title_header:
+                title = title_header.inner_text().strip()
+            if not title:
+                title = sidebar_title
+
+            author_el = page.query_selector(
+                ".kp-notebook-metadata .a-color-secondary, "
+                ".kp-notebook-metadata p"
+            )
+            if author_el:
+                author = (
+                    author_el.inner_text().strip()
+                    .replace("By: ", "").replace("by: ", "").strip()
+                )
+
+            asin_attr = book_el.get_attribute("id") or ""
+            if asin_attr.startswith("B"):
+                asin = asin_attr
+
+            scroll_to_load_all(
+                page,
+                "#annotations-container, .a-row.a-spacing-base",
+                "#annotationHighlightHeader",
+            )
+
+            highlights = extract_highlights_from_pane(page)
+            print(f"  Found {len(highlights)} highlights.")
+
+            books_data.append({
+                "title": title, "author": author,
+                "asin": asin, "highlights": highlights,
+            })
+
+        context.close()
+
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+    output = {
+        "source": "amazon-kindle-notebook",
+        "fetched_at": timestamp,
+        "amazon_domain": domain,
+        "books": books_data,
+    }
+
+    filename = (
+        f"kindle-fetch-"
+        f"{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}.json"
+    )
+    output_path = output_dir / filename
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(output, f, indent=2, ensure_ascii=False)
+
+    total_hl = sum(len(b["highlights"]) for b in books_data)
+    print(f"\nDone! Fetched {total_hl} highlights from {len(books_data)} books.")
+    print(f"Saved to: {output_path}")
+
+
+if __name__ == "__main__":
+    args = parse_args()
+    fetch_highlights(args)
+```
 
 ### Re-Fetch
 
@@ -290,11 +555,7 @@ Re-fetching is safe. The import step deduplicates highlights, so running fetch m
 
 ### Non-US Amazon Domains
 
-For users on non-US Amazon stores, pass the `--amazon-domain` flag:
-
-```bash
-python ~/.openclaw/workspace/skills/hi-lite/tools/fetch_highlights.py --amazon-domain amazon.co.uk
-```
+For users on non-US Amazon stores, append `--amazon-domain <domain>` when running the script (e.g., `--amazon-domain amazon.co.uk`). Ask the user which Amazon store they use if unclear.
 
 ---
 
