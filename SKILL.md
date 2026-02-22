@@ -88,6 +88,8 @@ Each clipping is separated by `==========`. Parse the title/author from the firs
 
 **Bookcision text export** — Similar to My Clippings but may have different formatting. Adapt parsing accordingly.
 
+**Hi-Lite fetch JSON** — JSON output from `tools/fetch_highlights.py` (identifiable by `"source": "amazon-kindle-notebook"`). Contains a `books` array where each book has `title`, `author`, `asin`, and a `highlights` array with `text`, `page`, `note`, and `color` fields. Parse directly using the structured data. Map `page` to the location metadata line.
+
 **Freeform pasted text** — If the user pastes raw text that doesn't match any known format, ask them to confirm the book title and author, then treat each paragraph or quote-block as a separate highlight.
 
 ### Book File Format
@@ -251,6 +253,48 @@ Each quote includes full attribution (author and book title) since collections p
 - **"Show collection [name]"** — Read and display the specified collection.
 - **"Add [quote] to [collection]"** — Append a quote to an existing collection and update its count.
 - **"Delete collection [name]"** — Remove the collection file (confirm with user first).
+
+---
+
+## 7. Fetch from Amazon
+
+**Trigger**: `/hi-lite fetch` or "fetch my highlights from Amazon" or "sync my Kindle"
+
+### First-Time Setup
+
+Check if Playwright is installed by attempting to import it. If not available, guide the user through setup:
+
+```bash
+pip install -r ~/.openclaw/workspace/skills/hi-lite/tools/requirements.txt
+playwright install chromium
+```
+
+### Execution
+
+1. Run the fetch script via bash:
+   ```bash
+   python ~/.openclaw/workspace/skills/hi-lite/tools/fetch_highlights.py
+   ```
+2. A Chromium browser window will open and navigate to Amazon's notebook page.
+3. If the user isn't logged in, the script will pause and prompt them to sign in manually in the browser (this handles 2FA, CAPTCHA, etc.). The session is saved so future fetches won't require login.
+4. The script iterates through all annotated books, extracts highlights, and saves a JSON file to `~/.openclaw/workspace/hi-lite/raw/`.
+5. The script prints progress and a summary when done.
+
+### Post-Fetch
+
+After the fetch completes, automatically run the standard import flow (Section 2) on the fetched JSON file. The Hi-Lite fetch JSON format is a supported import format — see the Import & Parse section.
+
+### Re-Fetch
+
+Re-fetching is safe. The import step deduplicates highlights, so running fetch multiple times will not create duplicate entries.
+
+### Non-US Amazon Domains
+
+For users on non-US Amazon stores, pass the `--amazon-domain` flag:
+
+```bash
+python ~/.openclaw/workspace/skills/hi-lite/tools/fetch_highlights.py --amazon-domain amazon.co.uk
+```
 
 ---
 

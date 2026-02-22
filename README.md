@@ -60,6 +60,46 @@ This enables hybrid vector + BM25 search across all your highlights. Without it,
 - **Bookcision** — JSON or text exports from the [Bookcision](https://readwise.io/bookcision) browser extension
 - **Any raw text** — Paste or drop any text with highlights and Hi-Lite will do its best to parse it
 
+## Auto-Fetch from Amazon
+
+Fetch all your Kindle highlights directly from Amazon with a single command — no manual exporting needed.
+
+### Prerequisites
+
+- Python 3.8+
+- pip
+
+### First-Time Setup
+
+```bash
+pip install -r ~/.openclaw/workspace/skills/hi-lite/tools/requirements.txt
+playwright install chromium
+```
+
+### Usage
+
+Tell your OpenClaw assistant:
+
+> Fetch my highlights from Amazon
+
+Or:
+
+> /hi-lite fetch
+
+A browser window will open and navigate to Amazon's Kindle notebook. If you're not already logged in, you'll be prompted to sign in manually (the script handles 2FA and CAPTCHA by letting you do it yourself in the real browser). Your session is saved, so future fetches won't require logging in again.
+
+After fetching, Hi-Lite automatically imports the highlights into your library.
+
+### Non-US Amazon Domains
+
+If your Amazon account is on a non-US store (e.g., amazon.co.uk, amazon.de), mention it to your assistant or use the flag directly:
+
+```bash
+python tools/fetch_highlights.py --amazon-domain amazon.co.uk
+```
+
+---
+
 ## Usage
 
 All interaction happens through natural conversation with your OpenClaw assistant.
